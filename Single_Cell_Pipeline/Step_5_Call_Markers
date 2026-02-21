@@ -175,6 +175,71 @@ ggplot(joint.markers, aes(x = joint.fc, y = -log(joint.p, 10), color = cat, labe
   theme(aspect.ratio = 1.2, legend.position = 'none')
 
 
+# GO enrichments 
+
+# gene enrichment packages
+library(enrichR)
+library(GeneOverlap)
+set.seed(123)
+
+# define the enrichr databases to test
+dbs <- c('GO_Biological_Process_2023','GO_Cellular_Component_2023','GO_Molecular_Function_2023')
+
+
+# input list 
+enrich.input <- w.markers  %>% 
+  dplyr::filter(cat == 'up') %>% 
+  pull(gene)
+  
+  
+# background list 
+enrich.background <- read_tsv(file = 'Step3b_AllExpressedGenesInObject.tsv')$gene
+
+# run enrichR
+websiteLive <- getOption("enrichR.live")
+
+if (websiteLive) {
+    enrich.df <- enrichr(enrich.input, dbs, background = enrich.background)
+}
+
+df.1 <- as.data.frame(enrich.df[["GO_Biological_Process_2023"]]) %>% 
+  arrange(Adjusted.P.value) %>% 
+  slice_head(n = 10) %>% 
+  rowwise() %>% 
+  mutate(n.genes = length(str_split_1(as.character(Genes), ';')))
+
+ggplot(df.1, aes(y = fct_reorder(Term, -Adjusted.P.value), x = n.genes, fill = -log(Adjusted.P.value))) + 
+  geom_bar(stat = 'identity', width = 0.6, color = 'black') +
+  scale_fill_viridis(option = 'plasma') + 
+  scale_x_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  theme_light() + 
+  theme(axis.text.y = element_text(size = 7), 
+        axis.title.y = element_blank(), 
+        aspect.ratio = 1) 
+
+# enrichment plot wrapper
+plotEnrich(enrich.df[["GO_Molecular_Function_2023"]], showTerms = 20, numChar = 40, 
+           y = "Count", orderBy = "P.value")
+
+plotEnrich(enrich.df[["GO_Cellular_Component_2023"]], showTerms =10, numChar = 40, 
+           y = "Count", orderBy = "P.value") + 
+  theme(axis.text.y = element_text(size = 5), 
+        aspect.ratio = 1) 
+
+df.2 <- as.data.frame(enrich.df[["GO_Cellular_Component_2023"]]) %>% 
+  arrange(Adjusted.P.value) %>% 
+  slice_head(n = 10) %>% 
+  rowwise() %>% 
+  mutate(n.genes = length(str_split_1(as.character(Genes), ';')))
+
+ggplot(df.2, aes(y = fct_reorder(Term, -Adjusted.P.value), x = n.genes, fill = -log(Adjusted.P.value))) + 
+  geom_bar(stat = 'identity', width = 0.6, color = 'black') +
+  scale_fill_viridis(option = 'plasma') + 
+  scale_x_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  theme_light() + 
+  theme(axis.text.y = element_text(size = 7), 
+        axis.title.y = element_blank(), 
+        aspect.ratio = 1) 
 
 
 
