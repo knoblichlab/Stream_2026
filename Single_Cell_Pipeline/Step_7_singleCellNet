@@ -1,0 +1,454 @@
+# Annotate & test lineage similarity with singleCellNet
+
+# --- Load Packages & initialize ---- # 
+
+# software 
+require(Seurat)
+require(furrr)
+require(mclust)
+require(presto)
+require(singleCellNet)
+require(qs)
+require(harmony)
+
+# data wrangling
+require(tidyverse)
+require(gbutils)
+require(janitor)
+require(tidyselect)
+
+# plotting
+require(ggplot2)
+require(cowplot)
+require(ggrepel)
+require(scattermore)
+require(patchwork)
+require(forcats)
+require(scales)
+require(scattermore)
+require(viridis)
+
+
+palette <- c('#247BA0', '#FFE066', 'grey70', '#70C1B3', '#F25F5C')
+
+cts.w <- qread(file = 'Step1_CGE_Trajectory_LastSubset.qs')
+
+# Loaded Wang et al 2025 reference dataset
+##k.cts
+
+
+# subset reference to remove small groups and irrelevant cell types 
+k.type <- FetchData(k.cts, vars = c('Group', 'Region', 'type_updated')) %>% 
+  rownames_to_column(var = 'cell') %>% 
+  mutate(new.celltype = case_when(str_detect(type_updated, 'EN')  ~ 'EN', 
+                                  str_detect(type_updated, 'Astro') ~ 'Astrocyte', 
+                                  str_detect(type_updated, 'Olig') ~ 'Oligodendrocyte', 
+                                           .default = type_updated)) %>% 
+  mutate(new.reg = case_when(Region == 'Telencephalon' ~ 'Telencephalon', .default = 'Cortical')) %>% 
+  mutate(k.type = case_when(str_detect(new.celltype, 'IN') & str_detect(new.celltype, 'Immature') ~ paste0(Group, '_', new.celltype), 
+                            str_detect(new.celltype, 'RG') & Region == 'Telencephalon' ~ paste0(Region, '_', new.celltype),
+                            .default = new.celltype)) 
+
+
+
+kt.counts <- as.data.frame(table(k.type$k.type)) %>% arrange(desc(Freq))
+
+small.groups <- kt.counts %>% dplyr::filter(Freq < 100) %>% droplevels() %>% pull(Var1)
+
+k.cts <- AddMetaData(k.cts, (k.type %>% dplyr::select(cell, k.type) %>% column_to_rownames(var = 'cell')))
+
+kt.counts
+
+# subset for training (matching labels, etc) 
+k.train <- subset(k.cts, subset = !(k.type %in% c(small.groups, 'Microglia', 'Vascular', 'Unknown') | Group == 'Adolescence'))
+
+# -- cell net -- # 
+
+commonGenes = intersect(rownames(k.train), rownames(cts.w))
+length(commonGenes)
+
+# Subset the reference to shared genes 
+k.train = k.train[commonGenes,]
+
+# Table of Sample Metadata 
+stRef <- k.train@meta.data
+stRef$cell_ID <- colnames(k.train)
+droplevels(stRef)
+
+# Get normalized counts as a matrix
+k.train <- NormalizeData(k.train)
+ref.mtx <- GetAssayData(k.train, layer = 'data')
+
+# Set up for training
+set.seed(123)
+stList <- splitCommon(sampTab = stRef, ncells = 100, dLevel = 'k.type')
+stTrain <- stList[[1]] 
+expTrain <- ref.mtx[,rownames(stTrain)]
+
+# Train the classifier 
+
+class_info <- scn_train(stTrain = stTrain, 
+                        expTrain = expTrain, 
+                        nTopGenes = 30,
+                        nRand = 70, 
+                        nTrees = 1000, 
+                        nTopGenePairs = 60, 
+                        dLevel = 'k.type', 
+                        colName_samp = 'cell_ID')
+
+# Validate training
+stTestList <- splitCommon(sampTab = stList[[2]], ncells = 100, dLevel = 'k.type')
+stTest <- stTestList[[1]]
+expTest <- ref.mtx[commonGenes, rownames(stTest)]
+
+
+#predict
+classRes_validation = scn_predict(cnProc=class_info[['cnProc']], expDat=expTest, nrand = 50)
+
+# HeatMap 
+nrand = 50
+sla = as.vector(stTest$k.type)
+names(sla) = as.vector(stTest$cell_ID)
+slaRand = rep("rand", nrand) 
+names(slaRand) = paste("rand_", 1:nrand, sep='')
+sla = append(sla, slaRand) #include in the random cells profile created
+
+sc_hmClass(classMat = classRes_validation, grps = sla, max=300, isBig=TRUE) 
+
+
+# Attribution Plot 
+plot_attr(classRes=classRes_validation, sampTab=stTest, nrand=nrand, dLevel="k.type", sid="cell_ID")
+
+
+# Convert to matrix format 
+mx.w <- GetAssayData(cts.w, layer = 'data')
+nqRand = 50
+
+crQuery <- scn_predict(class_info[['cnProc']], mx.w, nrand=nqRand)
+
+# Visualize assigments 
+
+# Sample table for Query 
+stCts <- cts.w@meta.data
+stCts$cell_ID <- colnames(cts.w)
+droplevels(stCts)
+
+sgrp = as.vector(stCts$annot_4)
+names(sgrp) = as.vector(stCts$cell_ID)
+grpRand =rep("rand", nqRand)
+names(grpRand) = paste("rand_", 1:nqRand, sep='')
+sgrp = append(sgrp, grpRand)
+
+# heatmap classification result
+sc_hmClass(crQuery, sgrp, max=5000, isBig=TRUE, cCol=F, font=8)
+
+# Attribution Plot 
+clas.plot <- plot_attr(classRes=crQuery, sampTab=stQuery, nrand=nqRand, dLevel="annot_4", sid="cell_ID")
+
+clas.plot
+
+### -- Train Against Nascimento 2024 --- ###
+
+# reference set 
+## cts.nas 
+
+# subset the object to cortical interneurons 
+cts.nas.cint <- subset(cts.nas, subset = author_cell_type %in% c('Non-cortical Interneurons', 'Cortical Interneurons') & ! age_group %in% c('Adult (27y-79y)', 'Teen (13y)') )
+
+# embed the subset data 
+cts.nas.cint <- FindVariableFeatures(cts.nas.cint)
+cts.nas.cint <- ScaleData(cts.nas.cint) 
+cts.nas.cint <- RunPCA(cts.nas.cint) 
+cts.nas.cint <- FindNeighbors(cts.nas.cint, dims = 1:20)
+cts.nas.cint <- FindClusters(cts.nas.cint, resolution = 0.3, cluster.name = 'cint_clust_0.3')
+cts.nas.cint <- FindClusters(cts.nas.cint, resolution = 0.35, cluster.name = 'cint_clust_0.35')
+cts.nas.cint <- FindClusters(cts.nas.cint, resolution = 0.4, cluster.name = 'cint_clust_0.4')
+cts.nas.cint <- FindClusters(cts.nas.cint, resolution = 0.5, cluster.name = 'cint_clust_0.5')
+cts.nas.cint <- FindClusters(cts.nas.cint, resolution = 0.6, cluster.name = 'cint_clust_0.6')
+cts.nas.cint <- RunUMAP(cts.nas.cint, reduction = 'pca', dims = 1:20, reduction.name = 'cint_umap')
+
+
+DimPlot(cts.nas.cint, reduction = 'cint_umap', group.by = 'cint_clust_0.5', label = T) + theme(aspect.ratio = 1)
+
+cint.md <- FetchData(cts.nas.cint, vars = c('region', 'age_group', 'author_cell_type', 'cint_clust_0.6')) %>%
+  rownames_to_column(var = 'cell') %>% 
+  rowwise() %>% 
+  mutate(age_group = str_split_1(as.character(age_group), ' ')[1]) %>%
+  ungroup() %>% 
+  mutate_all( ~ str_replace_all(., " ", "_")) 
+
+cint.markers <- FindAllMarkers(cts.nas.cint, only.pos = T, group.by = 'cint_clust_0.6')
+
+# find top markers
+cint.markers %>%
+    group_by(cluster) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10.markers
+
+
+```
+Res 0.6
+0 - Embryonic MGE
+1 - Embryonic CGE 
+2 - Postnatal CGE VIP 
+3 - Postnatal MGE
+4 - Postnatal MGE
+5 - Non-Cort
+6 - Non-Cort
+7 - Postnatal CGE 
+8 - Embryonic MGE
+9 - Embryonic MGE
+10 - Embryonic CGE 
+11 - Postnatal CGE Immature
+12 - Non-Cort
+13 - Non-Cort
+14 - Embryonic MGE
+15 - Postnatal LAMP5+ CGE
+16 - Non-Cort
+17 - Postnatal MGE Immature
+18 - Postnatal EC Stream 
+19 - Hippocampal?
+
+Res 0.4
+0 - Embryonic MGE
+1 - Embryonic CGE 
+2 - Postnatal CGE - VIP+ 
+3 - Postnatal MGE
+4 - Postnatal MGE 
+5 - Non-Cortical
+6 - Stream 
+7 - Non-Cortical
+8 - Embryonic MGE 
+9 - Non-Cortical
+10 - Non-Cortical
+11 - Postnatal LAMP5+ CGE 
+12 - Embryonic MGE 
+13 - Non-Cortical
+14 - Postnatal MGE 
+15 - Postnatal LAMP5+ CGE 
+16 - Hippocampal? 
+```
+
+# relabel 0.4 
+cint.label <- cint.md %>%
+  mutate(cint.label = case_when(author_cell_type == 'Non-cortical_Interneurons' ~ author_cell_type, 
+                                cint_clust_0.4 %in% c('0', '8', '12') ~ 'Embryonic_MGE', 
+                                cint_clust_0.4 %in% c('1') ~ 'Embryonic_CGE', 
+                                cint_clust_0.4 %in% c('2') ~ 'Postnatal_CGE_VIP', 
+                                cint_clust_0.4 %in% c('11') ~ 'Postnatal_CGE_LAMP_1', 
+                                cint_clust_0.4 %in% c('15') ~ 'Postnatal_CGE_LAMP_2',
+                                cint_clust_0.4 %in% c('6') ~ 'Postnatal_EC_Stream',
+                                cint_clust_0.4 %in% c('3', '4', '14') ~ 'Postnatal_MGE', 
+                                cint_clust_0.4 %in% c('16') ~ 'Postnatal_IN_Other', 
+                                cint_clust_0.4 %in% c('5', '7', '13') ~ 'Non-cortical Interneurons', 
+                                .default = 'flag')) 
+
+table(cint.label$cint.label) %>% as.data.frame() %>% arrange(desc(Freq))
+
+cint6.label <- cint.md %>%
+  mutate(cint6.label = case_when(author_cell_type == 'Non-cortical_Interneurons' ~ author_cell_type, 
+                                cint_clust_0.6 %in% c('0', '8', '9', '14') ~ 'Embryonic_MGE', 
+                                cint_clust_0.6 %in% c('1', '10') ~ 'Embryonic_CGE', 
+                                cint_clust_0.6 %in% c('2') ~ 'Postnatal_CGE_VIP', 
+                                cint_clust_0.6 %in% c('7') ~ 'Postnatal_CGE', 
+                                cint_clust_0.6 %in% c('15') ~ 'Postnatal_CGE_LAMP5',
+                                cint_clust_0.6 %in% c('18') ~ 'Postnatal_EC_Stream',
+                                cint_clust_0.6 %in% c('3', '4') ~ 'Postnatal_MGE', 
+                                cint_clust_0.6 %in% c('17') ~ 'Postnatal_MGE_Immature', 
+                                cint_clust_0.6 %in% c('11') ~ 'Postnatal_CGE_Immature', 
+                                cint_clust_0.6 %in% c('19') ~ 'Postnatal_IN_Other', 
+                                cint_clust_0.6 %in% c('5', '6', '12', '13', '16') ~ 'Non-cortical_Interneurons', 
+                                .default = 'flag')) 
+
+table(cint6.label$cint6.label) %>% as.data.frame() %>% arrange(desc(Freq))
+
+# Make metadata object for the full dataset 
+## to do this, join the subset cint labels to the full nas cell type annotations 
+nas.md <- FetchData(cts.nas, vars = c('author_cell_type', 'age_group', 'region')) %>% 
+  rownames_to_column(var = 'cell') %>% 
+  left_join(cint6.label, by = c('cell' = 'cell')) %>% 
+  rowwise() %>% mutate(age_group = str_split_1(as.character(age_group.x), ' ')[1]) %>% ungroup() %>% 
+  mutate(age.type = case_when(age_group %in% c('Adult', 'Teen', 'Toddler') ~ paste0('Postinfancy_', author_cell_type.x), .default = author_cell_type.x)) %>%  
+  mutate(n6.label = coalesce(cint6.label, age.type)) %>% 
+  mutate_all( ~ str_replace_all(., " ", "_")) 
+
+table(nas.md$n6.label) %>% as.data.frame() %>% arrange(desc(Freq))
+
+
+
+nlabel.md <- nas.md %>% dplyr::select(cell, n6.label) %>% column_to_rownames(var = 'cell')
+
+cts.nas <- AddMetaData(cts.nas, nlabel.md)
+
+DimPlot(cts.nas, group.by = 'n6.label', raster = T, label = T)
+
+# eliminate small clusters 
+small.clusters <- table(nlabel.md$n6.label) %>% as.data.frame() %>% dplyr::filter(Freq < 500) %>%  droplevels() %>% pull(Var1)
+
+nas.train <- subset(cts.nas, subset = !(n6.label %in% c(small.clusters, 'Postinfancy_Excitatory_Neurons', 'Vascular_Cells', 'Postinfancy_Vascular_Cells', 'Postinfancy_Ependymal_Cells', 'Ependymal_Cells', 'Microglia', 'Postinfancy_Microglia')))
+
+commonGenes = intersect(rownames(nas.train), rownames(cts.w))
+length(commonGenes)
+
+# Subset the reference to shared genes 
+nas.train = nas.train[commonGenes,]
+
+# Table of Sample Metadata 
+stRef <- nas.train@meta.data
+stRef$cell_ID <- colnames(nas.train)
+droplevels(stRef)
+
+# Get normalized counts as a matrix
+ref.mtx <- GetAssayData(nas.train, layer = 'data')
+
+# Set up for training
+set.seed(123)
+stList <- splitCommon(sampTab = stRef, ncells = 200, dLevel = 'n6.label')
+stTrain <- stList[[1]] 
+expTrain <- ref.mtx[,rownames(stTrain)]
+
+# Train the classifier 
+
+class_info <- scn_train(stTrain = stTrain, 
+                        expTrain = expTrain, 
+                        nTopGenes = 30,
+                        nRand = 70, 
+                        nTrees = 1000, 
+                        nTopGenePairs = 60, 
+                        dLevel = 'n6.label', 
+                        colName_samp = 'cell_ID')
+
+# Validate training
+stTestList <- splitCommon(sampTab = stList[[2]], ncells = 200, dLevel = 'n6.label')
+stTest <- stTestList[[1]]
+expTest <- ref.mtx[commonGenes, rownames(stTest)]
+
+
+#predict
+classRes_validation = scn_predict(cnProc=class_info[['cnProc']], expDat=expTest, nrand = 50)
+
+
+# HeatMap 
+nrand = 50
+sla = as.vector(stTest$n6.label)
+names(sla) = as.vector(stTest$cell_ID)
+slaRand = rep("rand", nrand) 
+names(slaRand) = paste("rand_", 1:nrand, sep='')
+sla = append(sla, slaRand) #include in the random cells profile created
+
+sc_hmClass(classMat = classRes_validation, grps = sla, max=300, isBig=TRUE) 
+
+# Attribution Plot 
+plot_attr(classRes=classRes_validation, sampTab=stTest, nrand=nrand, dLevel="n6.label", sid="cell_ID")
+
+# Convert to matrix format 
+mx.w <- GetAssayData(cts.w, layer = 'data')
+nqRand = 50
+
+crQuery <- scn_predict(class_info[['cnProc']], mx.w, nrand=nqRand)
+
+# Visualize assigments 
+
+# Sample table for Query 
+stCts <- cts.w@meta.data
+stCts$cell_ID <- colnames(cts.w)
+droplevels(stCts)
+
+sgrp = as.vector(stCts$annot_4)
+names(sgrp) = as.vector(stCts$cell_ID)
+grpRand =rep("rand", nqRand)
+names(grpRand) = paste("rand_", 1:nqRand, sep='')
+sgrp = append(sgrp, grpRand)
+
+# heatmap classification result
+sc_hmClass(crQuery, sgrp, max=5000, isBig=TRUE, cCol=F, font=8)
+
+stQuery <- get_cate(classRes = crQuery, sampTab = stCts, dLevel = "annot_4", sid = 'cell_ID', nrand = nqRand)
+
+
+# Attribution Plot 
+clas.plot <- plot_attr(classRes=crQuery, sampTab=stQuery, nrand=nqRand, dLevel="annot_4", sid="cell_ID")
+
+clas.plot
+
+class.df <- clas.plot$data 
+
+# Trajectory information 
+part.data <- read_tsv(file = 'Step2_Partition_Data.tsv') 
+
+net.df <- class.df %>% 
+  left_join(part.data, by = c('sid' = 'cell'))
+
+vl1 <- sc_violinClass(sampTab = stQuery, classRes = crQuery, sid = "cell_ID", dLevel = "annot_4", addRand = nqRand)
+score.df <- vl1$data
+score.mx <- score.df %>% 
+  pivot_wider(names_from = cell_type, values_from = classification_score)
+
+
+# Call Types 
+
+# Matrix of confidences 
+cr.mx <- score.df %>% 
+  pivot_wider(values_from = classification_score, names_from = cell_type) 
+  
+
+cr.tb <- tibble(cell = cr.mx$cell_ID, 
+                xcon = apply((cr.mx %>% dplyr::select(-c(cluster, cell_ID))), 1, c, simplify = F)) %>%
+  rowwise() %>%
+  mutate(xsort = list(sort(xcon, decreasing = T, index.return = T))) %>% 
+  mutate(topN.con = list(xcon[xsort$ix[1:5]]),
+         topN.type = list(names(xsort$x[1:min(5, length(xsort))]))) %>% 
+  mutate(top.Type = topN.type[1], 
+         top.Con = topN.con[1], 
+         b.Type = topN.type[2], 
+         b.Con = topN.con[2]) %>% 
+  mutate(type.Dif = top.Con - b.Con, 
+         type.Prop = top.Con/b.Con) %>% 
+  mutate(con.score = (type.Dif * 100) * (top.Con * 100)) %>%
+  # convert lists into strings
+  mutate(topN.con = str_c(topN.con, collapse = ', '), 
+         topN.type = str_c(topN.type, collapse = ', ')) %>% 
+  dplyr::select(-starts_with('x')) %>% 
+  left_join( (cr.mx %>% dplyr::select(cell_ID, cluster)), by = c('cell' = 'cell_ID'))
+
+
+# summarize totals
+sum.calls <- net.df %>%
+  group_by(group, category) %>% 
+  summarize(nCalls = n())
+
+# join 
+cr.sum <- cr.df %>% 
+  group_by(cluster, cell_type) %>% 
+  summarize(nCells.total = n(), 
+            avg.score = mean(classification_score), 
+            sd.score = sd(classification_score), 
+            .groups = 'keep') 
+
+
+cr.sum.df <- cr.sum %>%
+  left_join(sum.calls, by = c('cluster' = 'group', 'cell_type' = 'category')) %>% 
+  mutate(cell.prop = nCalls / nCells.total) %>% 
+  dplyr::filter(cell_type != 'rand') 
+
+ggplot(cr.sum.df, aes(x = cell_type, y = cluster, size = cell.prop, color = avg.score)) + 
+  geom_point(position = 'identity') + 
+  scale_color_viridis() + 
+  theme_cowplot() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+ggplot(cr.df %>% dplyr::filter(cluster %in% c('Stream_INs', 'Late_IN_Immature', 'Late_CGE_Progenitor') & cell_type != 'rand'), 
+       aes(y = fct_reorder(cell_type, classification_score, .fun = median), x = classification_score, fill = cell_type)) + 
+  geom_jitter(width = 0.01, height = 0.15 , size = 0.01, alpha = 0.5) + 
+  geom_boxplot(width = 0.5, outliers = F) + 
+  scale_fill_manual(values = myPal) +
+  facet_grid(~cluster) + 
+  theme_light() + 
+  xlab('In Vivo Cell Types') + 
+  ylab('Classification Score') + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), aspect.ratio = 1.2, legend.position = 'none')
+
+
+
+
+
