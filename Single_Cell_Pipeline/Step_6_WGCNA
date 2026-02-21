@@ -1,0 +1,238 @@
+# Identify co-expression networks 
+
+## ----- Load Packages & Initialize ----- ## 
+
+# Single Cell
+require(qs)
+require(Seurat)
+require(presto)
+require(DESeq2)
+require(hdWGCNA)
+
+# Data Wrangling
+library(tidyverse)
+library(forcats)
+library(ggplot2)
+library(ggrepel)
+library(cowplot)
+library(ggrepel)
+library(patchwork)
+library(scales)
+library(scattermore)
+library(hrbrthemes)
+library(lemon)
+library(ggpp)
+library(RColorBrewer)
+
+# palettes
+cols.clusters <- c(brewer.pal(12, name = 'Set3'), '#689689', '#247BA0',  '#F25F5C', '#ffafcc')
+cols.3 <- c('#f7d486','#49beaa', '#f27a7d')
+new.scale <- c('#33a8c7','#52e3e1', '#a0e426', '#fdf148', '#ffab00', '#f77976', '#9336fd', '#f050ae', '#d883ff')
+
+# enamble multithreading for hdwgcna
+enableWGCNAThreads(nThreads = 16)
+
+# load and update object for hdwgcan 
+cts <- qread(file = 'Step1_CGE_Trajectory_LastSubset.qs')
+cts <- SeuratObject::UpdateSeuratObject(cts)
+
+# Get pseudotime values 
+pt.data <- read_tsv(file = 'Step2_PseudotimeValues_CGE_Trajectory.tsv') %>% 
+  dplyr::select(cell, pt) %>% 
+  column_to_rownames(var = 'cell')
+
+# Partition Data
+require(monocle3)
+## Load CDS from monocle
+cds <- qread(file = 'Step2_CGE_Trajectory_Pseudotime_Monocle.qs')
+
+## Get partition from the plot 
+part <- plot_cells(cds, color_cells_by = "partition", cell_stroke = 0, group_label_size = 4, cell_size = .8)
+
+# Make into medatadata column
+part.data <- ggplot_build(part)[["plot"]][["data"]] %>% 
+  rownames_to_column(var = 'cell') %>% 
+  dplyr::rename('partition' = 'cell_color') %>% 
+  dplyr::select(cell, partition) %>% 
+  column_to_rownames(var = 'cell')
+
+# Add metadata 
+cts <- AddMetaData(cts, pt.data)
+cts <- AddMetaData(cts, part.data)
+
+# --- hdwgcna --- # 
+
+# Select genes expressed in at least 5% of cells in the dataset (fraction = 0.05)
+cts <- SetupForWGCNA(cts, gene_select = 'fraction', fraction = 0.05, wgcna_name = 'CGE')
+
+# Set idents to clusters
+Idents(cts) <- 'annot_cluster'
+
+# construct metacells 
+cts <- MetacellsByGroups(cts,
+                           group.by = c('annot_cluster', 'orig.ident'),
+                           reduction = 'cge4_har_default',
+                           k = 25, 
+                           max_shared = 10, 
+                           ident.group = 'annot_cluster')
+
+# Normalize the metacell matrix
+cts <- NormalizeMetacells(cts)
+
+# List all groups 
+clusters <- c('10_Stream_INs', '2_Late_IN_Immature', '4_Late_CGE_Progenitor', '6_Late_IN_Immature', '7_IN_Progenitor')
+
+#
+cts <- SetDatExpr(cts, 
+                  group_name = clusters,
+                    group.by = 'annot_cluster',
+                    assay = 'RNA',
+                    layer = 'data')
+
+# select soft power threshold
+cts <- TestSoftPowers(cts, networkType = 'signed')
+
+plot.list <- PlotSoftPowers(cts)
+
+wrap_plots(plot.list, ncol = 2)
+
+# Construct the Topological Overlap Matrix (TOM)
+cts <- ConstructNetwork(cts, tom_name = 'CGE_Traj_Late_Extended_sp5', soft_power = 5)
+
+PlotDendrogram(cts, main = 'Late CGE Trajectory')
+
+# get module eigengenes
+cts <- ModuleEigengenes(cts)
+
+# get connectivity 
+
+cts <- ModuleConnectivity(cts)
+
+cts <- ResetModuleNames(cts, new_name = 'Late_CGE')
+
+
+p <- PlotKMEs(cts, ncol = 4, n_hubs = 11)
+
+# get module MEs
+mod.as.ex <- GetModules(cts)
+
+hub.ex <- GetHubGenes(cts, n_hubs = 25)
+
+# plot against pseudotime 
+
+# pal
+pt.comp.palette <- c('#89c2d9', '#e9c46a',  '#f48498',  '#2a9d8f', '#f4a261', '#e76f51', '#7209b7')
+# Get MEs by cell 
+me.extended <- GetMEs(cts) %>%
+  rownames_to_column(var = 'cell')
+
+# Subset to late partition 
+plot.df <- FetchData(cts, vars = c('pt', 'annot_4', 'annot_cluster', 'partition')) %>% 
+  rownames_to_column(var = 'cell') %>% 
+  left_join(me.extended, by = c('cell' = 'cell')) %>% 
+  dplyr::filter(partition == '2')
+
+
+# Plot 
+p.m1 <- ggplot(plot.df, aes(x = pt, y = Late_CGE1, color = annot_4)) + 
+  geom_point(position = position_jitter(width = .25, height = .25), size = 1) + 
+  scale_color_manual(values = pt.comp.palette) + 
+  theme_cowplot() + 
+  xlab('Pseudotime') + 
+  ylab('Module Expression') + 
+  ggtitle('Module 1') + 
+  theme(aspect.ratio = 1, legend.position = 'none') 
+
+p.m2 <- ggplot(plot.df, aes(x = pt, y = Late_CGE2, color = annot_4)) + 
+  geom_point(position = position_jitter(width = .25, height = .25), size = 1) + 
+  scale_color_manual(values = pt.comp.palette) +
+  theme_cowplot() + 
+  xlab('Pseudotime') + 
+  ylab('') + 
+  ggtitle('Module 2') + 
+  theme(aspect.ratio = 1, legend.position = 'none') 
+
+p.m3 <- ggplot(plot.df, aes(x = pt, y = Late_CGE3, color = annot_4)) + 
+  geom_point(position = position_jitter(width = .25, height = .25), size = .75) + 
+  scale_color_manual(values = pt.comp.palette) + 
+  theme_cowplot() + 
+  xlab('Pseudotime') + 
+  ylab('') + 
+  ggtitle('Module 3') + 
+  theme(aspect.ratio = 1, legend.position = 'none') 
+
+p.m4 <- ggplot(plot.df, aes(x = pt, y = Late_CGE4, color = annot_4)) + 
+  geom_point(position = position_jitter(width = .25, height = .25), size = 1) + 
+  scale_color_manual(values = pt.comp.palette) + 
+  theme_cowplot() + 
+  xlab('Pseudotime') + 
+  ylab('') + 
+  ggtitle('Module 4') + 
+  theme(aspect.ratio = 1, legend.position = 'none') 
+
+p.m5 <- ggplot(plot.df, aes(x = pt, y = Late_CGE5, color = annot_4)) + 
+  geom_point(position = position_jitter(width = .25, height = .25), size = 1) + 
+  scale_color_manual(values = pt.comp.palette) + 
+  theme_cowplot() + 
+  xlab('Pseudotime') + 
+  ylab('') + 
+  ggtitle('Module 5') + 
+  guides(color = guide_legend(title = 'Cell Type')) + 
+  theme(aspect.ratio = 1) 
+
+p.m5b <- ggplot(plot.df, aes(x = pt, y = Late_CGE5, color = annot_4)) + 
+  geom_point(position = position_jitter(width = .25, height = .25), size = 1) + 
+  scale_color_manual(values = pt.comp.palette) + 
+  theme_cowplot() + 
+  xlab('Pseudotime') + 
+  ylab('') + 
+  ggtitle('Module 5') + 
+  guides(color = guide_legend(title = 'Cell Type')) + 
+  theme(aspect.ratio = 1, legend.position = 'none') 
+
+p.m6 <- ggplot(plot.df, aes(x = pt, y = Late_CGE6, color = annot_4)) + 
+  geom_point(position = position_jitter(width = .25, height = .25), size = 1) + 
+  scale_color_manual(values = pt.comp.palette) + 
+  theme_cowplot() + 
+  xlab('Pseudotime') + 
+  ylab('') + 
+  ggtitle('Module 6') + 
+  guides(color = guide_legend(title = 'Cell Type')) + 
+  theme(aspect.ratio = 1) 
+
+wrap_plots(p.m1, p.m2, p.m3, p.m4, p.m5, nrow = 1)
+
+# intersect with nascimento 
+# module 3 genes 
+mod3.genes <- read.table(file = 'Step4d_Genes_byModules.tsv', row.names = 1) %>% 
+  dplyr::filter(module == 'Late_CGE3')
+
+# nascimento markers 
+##nas.markers 
+
+# intersection 
+nas.mod3 <- nas.markers %>% 
+  dplyr::filter(gene %in% mod3.genes$gene_name) %>% 
+  mutate(label = case_when(gene %in% (nas.mod3 %>% arrange(desc = T) %>% head(n = 10))$gene ~ gene, .default = NA), 
+         cat = case_when(p_val_adj < 0.05 & avg_log2FC > 1 ~ 'up', 
+                         p_val_adj < 0.05 & avg_log2FC < -1 ~ 'down',
+                         .default = 'ns'))
+
+# volcano plot
+ggplot(nas.mod3, aes(x = avg_log2FC, y = -log(p_val_adj, 10), color = cat, label = label)) +
+  geom_point(size = 1) + 
+  scale_color_manual(values = c('grey70', '#38b000', '#7209b7')) + 
+  geom_hline(yintercept = -log(0.05, 10), color = 'grey50') + 
+  geom_vline(xintercept = 1, color = 'grey50') + 
+  geom_vline(xintercept = -1, color = 'grey50') + 
+  geom_label_repel(size = 3) + 
+  xlab('EC Stream Avg Log2FC') + 
+  ylab('EC Stream -log10(P.Adj)') + 
+  ggtitle('Module 3 Gene Expression in vivo') + 
+  theme_cowplot() + 
+  panel_border(color = 'black') + 
+  theme(aspect.ratio = 1.1, legend.position = 'none')
+
+
+
+
