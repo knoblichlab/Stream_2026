@@ -1,0 +1,180 @@
+# Call Markers 
+
+
+## ---- Load Packages --- ## 
+
+
+# Single Cell
+require(qs)
+require(Seurat)
+require(presto)
+require(DESeq2)
+
+# Data Wrangling
+require(tidyverse)
+require(forcats)
+require(ggplot2)
+require(ggrepel)
+require(cowplot)
+require(ggrepel)
+require(patchwork)
+require(scales)
+require(scattermore)
+require(hrbrthemes)
+require(lemon)
+require(ggpp)
+
+# Palettes
+cols.clusters <- c(brewer.pal(12, name = 'Set3'), '#689689', '#247BA0',  '#F25F5C', '#ffafcc')
+cols.3 <- c('#f7d486','#49beaa', '#f27a7d')
+new.scale <- c('#33a8c7','#52e3e1', '#a0e426', '#fdf148', '#ffab00', '#f77976', '#9336fd', '#f050ae', '#d883ff')
+
+# --- Call Markers ---- # 
+# load CGE subset 
+
+cts <- qread(file = 'Step1_CGE_Trajectory_LastSubset.qs')
+
+# call CGE markers 
+## Subset cells for comparison
+stream.cells <- WhichCells(cts, expression = annot_cluster == '10_Stream_INs')
+cge.in.cells <- WhichCells(cts, expression = annot_cluster %in% c('1_Early1_IN_Immature', '8_Early2_IN_Immature', '2_Late_IN_Immature'))
+
+## Downsample to the size of cluster 10
+stream.markers.dwn <- FindMarkers(cts, ident.1 = stream.cells, ident.2 = cge.in.cells, max.cells.per.ident = 204, random.seed = 1)
+
+stream.markers.dwn %>% dplyr::filter(p_val_adj < 0.5 & avg_log2FC > 1) %>%
+  arrange(p_val_adj) %>%
+  head(n = 15) %>%
+  rownames_to_column(var = 'gene') %>%
+  droplevels() %>%
+  pull(gene) -> top15.stream
+
+stream.markers.df <- stream.markers.dwn %>%
+  rownames_to_column(var = 'gene') %>% 
+  mutate(cat = case_when(p_val_adj < 0.05 & avg_log2FC > 1 ~ 'up', 
+                         p_val_adj < 0.05 & avg_log2FC < -1 ~ 'down', 
+                         .default = 'ns')) %>%
+  mutate(label = case_when(cat == 'down' ~ gene, 
+                           gene %in% c(top12.stream, 'FGF14', 'CNTN5', 'DAB1', 'NRXN1') ~ gene, 
+                           .default = NA)) 
+
+# volcano plot 
+ggplot(stream.markers.df, aes(x = avg_log2FC, y = -log(p_val_adj, 10), color = cat, label = label)) +
+  geom_point(size = 1) + 
+  scale_color_manual(values = c('#7209b7','grey70','#38b000')) + 
+  geom_hline(yintercept = -log(0.05, 10), color = 'grey50') + 
+  geom_vline(xintercept = 1, color = 'grey50') + 
+  geom_vline(xintercept = -1, color = 'grey50') + 
+  geom_label_repel(size = 2.5) + 
+  xlab('Avg Log2 FC') + 
+  ylab('-log(P.adj)') + 
+  theme_cowplot() + 
+  theme(aspect.ratio = 1, legend.position = 'none')
+
+# --- Re-Call Call Nascimento et al. Markers ---- 
+
+# Nascimento full data with gene names 
+
+# nascimento 2024 single cell obejct 
+n.cts.con 
+
+
+# compare INs in the Migratory Stream (Infant) versus INs in the GE at the Fetal timepoint 
+n.sub.ge.stream <- subset(n.cts.con, subset = (author_cell_type == 'Cortical Interneurons' & sample == 'EC Stream' & age_group == 'Infant (14d-54d)') |
+                          (author_cell_type == 'Cortical Interneurons' & sample == 'CGE' & age_group == 'Fetal (23GW)')
+                          )
+length(Cells(n.sub.ge.stream))
+
+n.sub.ge.stream <- FindVariableFeatures(n.sub.ge.stream)
+n.sub.ge.stream <- ScaleData(n.sub.ge.stream) 
+n.sub.ge.stream <- RunPCA(n.sub.ge.stream) 
+n.sub.ge.stream <- FindNeighbors(n.sub.ge.stream, dims = 1:20)
+n.sub.ge.stream <- FindClusters(n.sub.ge.stream, resolution = 0.5, cluster.name = 'clust_0.5')
+n.sub.ge.stream <- FindClusters(n.sub.ge.stream, resolution = 0.5, cluster.name = 'clust_0.3')
+n.sub.ge.stream <- FindClusters(n.sub.ge.stream, resolution = 0.5, cluster.name = 'clust_0.1')
+n.sub.ge.stream <- RunUMAP(n.sub.ge.stream, reduction = 'pca', dims = 1:20, reduction.name = 'umap_default')
+
+DimPlot(n.sub.ge.stream, reduction = 'umap_default', group.by = 'clust_0.1')
+DimPlot(n.sub.ge.stream, reduction = 'umap_default', group.by = 'sample')
+DimPlot(n.sub.ge.stream, reduction = 'umap_default', group.by = 'region')
+DimPlot(n.sub.ge.stream, reduction = 'umap_default', group.by = 'age_group')
+
+# Clust 0, 5, and 6 are CGE, others look more LHX6 positive (as is known)
+# Clust 3 and 4 are stream 
+
+# Make table for this 
+call.type <- FetchData(n.sub.ge.stream, vars = c('clust_0.1')) %>% 
+  mutate(call = case_when(clust_0.1 %in% c('0', '5', '6') ~ 'cge',
+                          clust_0.1 %in% c('3', '4') ~ 'stream', 
+                          .default = 'none')) %>% 
+  dplyr::select(call)
+
+n.sub.ge.stream <- AddMetaData(n.sub.ge.stream, call.type)
+DimPlot(n.sub.ge.stream, reduction = 'umap_default', group.by = 'call')
+
+# Run differential expression 
+ident.stream <- WhichCells(n.sub.ge.stream, expression = call == 'stream')
+ident.cge <- WhichCells(n.sub.ge.stream, expression = call == 'cge')
+
+nas.markers <- FindMarkers(n.sub.ge.stream, ident.1 = ident.stream, ident.2 = ident.cge) %>% 
+  rownames_to_column(var = 'gene')
+
+# Intersect Full Set of DEGs
+full.intersect.df <- stream.markers.df %>%
+  dplyr::select(-cat) %>%
+  left_join(nas.markers, by = c('gene' = 'gene')) %>%
+  rowwise() %>%
+  mutate(joint.p = (p_val_adj.x + p_val_adj.y) / 2) %>%
+  mutate(joint.fc = (avg_log2FC.x + avg_log2FC.y) / 2)
+  ungroup()
+
+intersect.sig <- full.intersect.df %>% 
+  dplyr::filter(p_val_adj.x < 0.05 & p_val_adj.y < 0.05)
+
+ggplot(intersect.sig, aes(x = avg_log2FC.x, y = avg_log2FC.y, color = -log(joint.p))) + 
+  geom_point(size = 0.9) + 
+  scale_color_viridis(begin = .4) + 
+  scale_x_symmetric(mid = 0) + 
+  scale_y_symmetric(mid = 0) + 
+  xlab('LogFC Stream Marker (Wong)') + 
+  ylab('LogFC Stream Marker (Nascimento)') + 
+  geom_hline(yintercept = 0, color = 'grey60') + 
+  geom_vline(xintercept = 0, color = 'grey60') + 
+  stat_quadrant_counts() + 
+  theme_cowplot() + 
+  theme(aspect.ratio = 1) + 
+  panel_border(color = 'black', size = 1)
+
+
+
+# get joint markers 
+joint.markers <- intersect.sig %>%
+  dplyr::filter(avg_log2FC.x > 0 & avg_log2FC.y > 0 |
+                  avg_log2FC.x < 0 & avg_log2FC.y < 0) %>%
+  mutate(cat = case_when(joint.p < 0.05 & joint.fc > 1 ~ 'up', 
+                         joint.p < 0.05 & joint.fc < -1 ~ 'down', 
+                         .default = 'ns')) %>%
+  mutate(label = case_when(cat == 'down' ~ gene, 
+                           gene %in% c('CACNA2D3', 'ADARB2', 'KAZN', 
+                                       'CHSY3', 'FGF12', 'SORCS3', 
+                                       'FGF14', 'NRG3', 'DAB1', 
+                                       'RARB', 'GRIA1') ~ gene, .default = NA)) # make sure key labels are visible 
+
+# plot overlap 
+ggplot(joint.markers, aes(x = joint.fc, y = -log(joint.p, 10), color = cat, label = label)) +
+  geom_point(size = 1) + 
+  scale_color_manual(values = c('#7209b7','grey70','#38b000')) + 
+  geom_hline(yintercept = -log(0.05, 10), color = 'grey50') + 
+  geom_vline(xintercept = 1, color = 'grey50') + 
+  geom_vline(xintercept = -1, color = 'grey50') + 
+  xlab('Average Log2FC') + 
+  ylab('Average P.Adjusted') + 
+  ggtitle('Shared Stream Markers') + 
+  geom_label_repel(size = 2) + 
+  theme_cowplot() + 
+  theme(aspect.ratio = 1.2, legend.position = 'none')
+
+
+
+
+
