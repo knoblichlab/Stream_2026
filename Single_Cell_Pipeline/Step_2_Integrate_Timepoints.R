@@ -1,41 +1,42 @@
 ##
 
 # ------ load packages ----- #
-library(Seurat)
-library(tidyverse)
-library(ggplot2)
-library(cowplot)
-library(forcats)
-library(patchwork)
-library(scales)
-library(scattermore)
-library(qs)
+#
+require(Seurat)
+require(tidyverse)
+require(ggplot2)
+require(cowplot)
+require(forcats)
+require(patchwork)
+require(scales)
+require(scattermore)
 
-# Colors 
-cols.clusters <- c(brewer.pal(12, name = 'Set3'), '#689689', '#f7d486','#49beaa', '#f27a7d' )
-cols.3 <- c('#f7d486','#49beaa', '#f27a7d')
+
+
 
 # ------ format data ------ # 
 
-### list files, sample names, and future object names
-samples.df <- data.frame(sample = list.files(path = 'classification_cr710/classification/scv2/mtx')) %>%
-  mutate(path = paste0('classification_cr710/classification/scv2/mtx/', sample, '/filtered_feature_bc_matrix'),
+# list files, sample names, and future object names
+samples.df <- data.frame(sample = list.files(path = '/groups/knoblich/bioinfo/users/sakurako.wong/scRNAseq/R15864/cellranger/v2_GFP/classification_cr710/classification/scv2/mtx')) %>%
+  mutate(path = paste0('/groups/knoblich/bioinfo/users/sakurako.wong/scRNAseq/R15864/cellranger/v2_GFP/classification_cr710/classification/scv2/mtx/', sample, '/filtered_feature_bc_matrix'),
          out.object = paste0('cts.', sample))
 
 
-### make each into Seurat object 
+# Make each into Seurat object 
 for(x in samples.df$sample){
-  path = paste0('classification_cr710/classification/scv2/mtx/', x, '/filtered_feature_bc_matrix')
+  path = paste0('/groups/knoblich/bioinfo/users/sakurako.wong/scRNAseq/R15864/cellranger/v2_GFP/classification_cr710/classification/scv2/mtx/', x, '/filtered_feature_bc_matrix')
   out.ob <- paste0('cts.', x)
   cts.data <- Read10X(data.dir = path)
   cts <- CreateSeuratObject(counts = cts.data, project = x, min.cells = 3, min.features = 200)
   assign(out.ob, cts)
 }
 
-### Merge matrices together 
+# Merge matrices together 
 s.merge <- merge(x = `cts.176-241500`, y = c(`cts.176-241501`, `cts.176-241502`, `cts.TSC.p24.4-241500`, `cts.TSC.p24.4-241501`, `cts.TSC.p24.4-241502`, `cts.TSC.p5.32s-241500`, `cts.TSC.p5.32s-241501`, `cts.TSC.p5.32s-241502`))
 
 length(Cells(s.merge)) # 19827 cells 
+
+s.merge <- JoinLayers(s.merge)
 
 qsave(s.merge, file = 'Wong_MergedTimepoints_Unfiltered.qs')
 
@@ -47,7 +48,16 @@ s.merge[['percent.mt']] <- PercentageFeatureSet(s.merge, pattern = '^MT-')
 
 metric.spread <- FetchData(s.merge, vars = c('orig.ident', 'percent.mt', 'nCount_RNA', 'nFeature_RNA'))
 
+ggplot(metric.spread, aes(x = orig.ident, y = percent.mt)) + 
+  geom_scattermore(stat = 'identity', position = position_jitter(width = 0.1), size = 1.8) + 
+  geom_violin() + 
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 12)) + 
+  theme_cowplot() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 8))
+
 s.sub <- subset(s.merge, subset = percent.mt < 5 & nFeature_RNA < (mean(s.merge$nFeature_RNA) + (1.5 * sd(s.merge$nFeature_RNA))))
+
+length(Cells(s.sub))
 
 # Cluster and visualize 
 s.sub <- NormalizeData(s.sub)
@@ -75,121 +85,78 @@ meta.tp <- FetchData(s.sub, vars = c('orig.ident')) %>%
   column_to_rownames(var = 'cell')
   
 s.sub <- AddMetaData(s.sub, meta.tp)
+  
+# -------- init annotation -------- $ 
 
-# ------- integration ------- # 
 
-# run harmony on sample 
-ss.har <- RunHarmony(s.sub, 'orig.ident')
-ss.har <- RunPCA(ss.har) 
-ss.har <- FindNeighbors(ss.har, dims = 1:20)
 
-ss.har <- FindClusters(ss.har, resolution = 0.7, cluster.name = 'hclust_0.7')
-ss.har <- FindClusters(ss.har, resolution = 0.5, cluster.name = 'hclust_0.5')
-ss.har <- FindClusters(ss.har, resolution = 0.3, cluster.name = 'hclust_0.3')
+s.sub <- FindClusters(s.sub, resolution = 0.7, cluster.name = 'clust_0.7')
+s.sub <- FindClusters(s.sub, resolution = 0.5, cluster.name = 'clust_0.5')
+s.sub <- FindClusters(s.sub, resolution = 0.3, cluster.name = 'clust_0.3')
+s.sub <- RunUMAP(s.sub, reduction = 'pca', dims = 1:20, n.neighbors = 10L, min.dist = 0.1, reduction.name = 'umap_k10_m01')
+s.sub <- RunUMAP(s.sub, reduction = 'pca', dims = 1:20, n.neighbors = 7L, min.dist = 0.05, reduction.name = 'umap_k7_m005')
 
-ss.har <- RunUMAP(ss.har, reduction = 'pca', dims = 1:20, reduction.name = 'har_default')
-ss.har <- RunUMAP(ss.har, reduction = 'pca', dims = 1:20, n.neighbors = 10L, min.dist = 0.1, reduction.name = 'har_umap_k10_m01')
-ss.har <- RunUMAP(ss.har, reduction = 'pca', dims = 1:20, n.neighbors = 7L, min.dist = 0.05, reduction.name = 'har_umap_k7_m005')
+s.sub <- RunUMAP(s.sub, reduction = 'pca', dims = 1:20, n.neighbors = 15L, min.dist = 0.1, reduction.name = 'umap_k15_m01')
+s.sub <- RunUMAP(s.sub, reduction = 'pca', dims = 1:20, n.neighbors = 20L, min.dist = 0.1, reduction.name = 'umap_k20_m01')
+s.sub <- RunUMAP(s.sub, reduction = 'pca', dims = 1:20, n.neighbors = 20L, min.dist = 0.2, reduction.name = 'umap_k20_m02')
+s.sub <- RunUMAP(s.sub, reduction = 'pca', dims = 1:20, n.neighbors = 30L, min.dist = 0.3, reduction.name = 'umap_k30_m03')
+s.sub <- RunUMAP(s.sub, reduction = 'pca', dims = 1:20, n.neighbors = 40L, min.dist = 0.1, reduction.name = 'umap_k40_m01')
 
-# examine markers 
-
-## neural progenitors 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("ascl1", "sox2", "sox1", "egfr", "vim")))
-
-## apcs 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("aqp4", "gfap", "s100b", "sparcl1", "f3")))
-
-## opcs 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("olig1", "olig2", "sox10", "nkx2-2", "pdgfra")))
-
-## inh progenitors 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("dlx2", "dlx5", "dlx6-as1", "scgn", "calb2")))
-
-### cge lineage 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("nr2f2", "prox1", "sp8", "reln", "vip")))
-
-### mge lineage 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("nkx2-1", "lhx6", "sox6", "dlx6-as1", "gsx6")))
-
-### lge lineage 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("meis2", "pax6", "gsx2", "npy", "ebf1")))
-
-### excitatory neurons 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("eomes", "tbr1", "cux1", "cux2", "emx1", "satb2","BCL11B" )))
-
-## proliferating 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("top2a", "mki67","hopx", "foxg1", "SLC1A3")))
-
-## mature neurons 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("NEUROD1", "GAD6","RBFOX3")))
-
-## stream top genes 
-FeaturePlot(ss.har, reduction = 'har_umap_k10_m01', toupper(c("DAB1", "FGF14","KAZN", "CNTN5", "RBFOX1")))
-
-### other embedding options 
-ss.har <- RunUMAP(ss.har, reduction = 'pca', dims = 1:20, n.neighbors = 15L, min.dist = 0.1, reduction.name = 'har_umap_k15_m01')
-ss.har <- RunUMAP(ss.har, reduction = 'pca', dims = 1:20, n.neighbors = 20L, min.dist = 0.1, reduction.name = 'har_umap_k20_m01')
-
-ss.har <- RunUMAP(ss.har, reduction = 'pca', dims = 1:20, n.neighbors = 20L, min.dist = 0.2, reduction.name = 'har_umap_k20_m02')
-ss.har <- RunUMAP(ss.har, reduction = 'pca', dims = 1:20, n.neighbors = 30L, min.dist = 0.3, reduction.name = 'har_umap_k30_m03')
-
-ss.har <- RunUMAP(ss.har, reduction = 'pca', dims = 1:20, n.neighbors = 40L, min.dist = 0.1, reduction.name = 'har_umap_k40_m01')
-
-### add annotation (level 1) 
-annot1.df <- FetchData(ss.har, vars = c('hclust_0.3')) %>% 
+# annot level 1
+annot1.df <- FetchData(s.sub, vars = c('clust_0.3')) %>% 
   rownames_to_column(var = 'cell') %>% 
-  mutate(annot_1 = case_when(hclust_0.3 %in% c('0', '1', '10') ~ 'IN', 
-                             hclust_0.3 %in% c('2', '5', '8') ~ 'IN_Progenitor', 
-                             hclust_0.3 %in% c('3', '4', '9', '11') ~ 'IN_Immature', 
-                             hclust_0.3 %in% c('6') ~ 'Astrocyte_Progenitor', 
-                             hclust_0.3 %in% c('7') ~ 'OPC', 
+  mutate(annot_1 = case_when(clust_0.3 %in% c('0', '1', '10') ~ 'IN', 
+                             clust_0.3 %in% c('2', '5', '8') ~ 'IN_Progenitor', 
+                             clust_0.3 %in% c('3', '4', '9', '11') ~ 'IN_Immature', 
+                             clust_0.3 %in% c('6') ~ 'Astrocyte_Progenitor', 
+                             clust_0.3 %in% c('7') ~ 'OPC', 
                              .default = 'unknown')) %>% 
   dplyr::select(cell, annot_1) %>%
   column_to_rownames(var = 'cell')
 
-ss.har <-AddMetaData(ss.har, annot1.df)
+s.sub <-AddMetaData(s.sub, annot1.df)
 
-### add annotation (level 2)
-annot2.df <- FetchData(ss.har, vars = c('hclust_0.3')) %>% 
+# Annot_Level_2
+annot2.df <- FetchData(s.sub, vars = c('clust_0.3')) %>% 
   rownames_to_column(var = 'cell') %>% 
-  mutate(annot_2 = case_when(hclust_0.3 %in% c('0') ~ 'IN_MGE', 
-                             hclust_0.3 %in% c('1') ~ 'IN_CGE', 
-                             hclust_0.3 %in% c('2', '5', '8') ~ 'IN_Progenitor', 
-                             hclust_0.3 %in% c('3') ~ 'IN_Immature_CGE', 
-                             hclust_0.3 %in% c('4') ~ 'IN_Immature_MGE', 
-                             hclust_0.3 %in% c('9', '11') ~ 'IN_Immature', 
-                             hclust_0.3 %in% c('10') ~ 'IN_MGE', 
-                             hclust_0.3 %in% c('6') ~ 'Astrocyte_Progenitor', 
-                             hclust_0.3 %in% c('7') ~ 'OPC', 
+  mutate(annot_2 = case_when(clust_0.3 %in% c('0') ~ 'IN_MGE', 
+                             clust_0.3 %in% c('1') ~ 'IN_CGE', 
+                             clust_0.3 %in% c('2', '5', '8') ~ 'IN_Progenitor', 
+                             clust_0.3 %in% c('3') ~ 'IN_Immature_CGE', 
+                             clust_0.3 %in% c('4') ~ 'IN_Immature_MGE', 
+                             clust_0.3 %in% c('9', '11') ~ 'IN_Immature', 
+                             clust_0.3 %in% c('10') ~ 'IN_MGE', 
+                             clust_0.3 %in% c('6') ~ 'Astrocyte_Progenitor', 
+                             clust_0.3 %in% c('7') ~ 'OPC', 
                              .default = 'unknown')) %>% 
   dplyr::select(cell, annot_2) %>%
   column_to_rownames(var = 'cell')
 
-ss.har <-AddMetaData(ss.har, annot2.df)
+s.sub <- AddMetaData(s.sub, annot2.df)
 
-# save 
-ss.har <- JoinLayers(ss.har)
-qsave(ss.har, file = 'Harmonized_Wong_AllTimepoints.qs')
+DimPlot(s.sub, reduction = 'har_umap_k10_m01', group.by = 'annot_2', label = T)
 
-### ----- Annotation: Find Markers ----- ### 
-# reload 
-cts <- qread(file = '../Integrate_Timepoints/Harmonized_Wong_AllTimepoints.qs')
+# Top Markers 
+cts.markers <- FindAllMarkers(s.sub, group.by = 'clust_0.3', logfc.threshold = 0.25, random.seed = 1)
 
-# call markers
-cts.markers <- FindAllMarkers(cts, group.by = 'hclust_0.3', logfc.threshold = 0.25, random.seed = 1)
+write.table(cts.markers, file = 'Step0_FullObject_Markers.tsv', sep = '\t', quote = F, row.names = T, col.names = T)
 
-## heatmap
+
 cts.markers %>%
     group_by(cluster) %>%
     dplyr::filter(avg_log2FC > 1) %>%
     slice_head(n = 4) %>%
     ungroup() -> top4.markers
 
-DoHeatmap(cts, group.by = 'hclust_0.3', features = top4.markers$gene) + NoLegend() + scale_fill_viridis() + theme(aspect.ratio = 0.35)
 
-## annotation level 3 
+p0 <- DoHeatmap(cts, group.by = 'clust_0.3', features = top4.markers$gene) + NoLegend() + scale_fill_viridis() + theme(aspect.ratio = 0.35)
 
-md.annot3 <- FetchData(cts, vars = c('hclust_0.3')) %>% 
+ggsave(p0, file = 'Step0_FullObject_MarkerHeatmap.pdf', width = 12, height = 6, units = 'in', device = 'pdf')
+
+p0
+
+
+md.annot3 <- FetchData(s.sub, vars = c('clust_0.3')) %>% 
   rownames_to_column(var = 'cell') %>%
   mutate(annot_3 = case_when(hclust_0.3 == '0' ~ '0_IN_Mixed', 
                            hclust_0.3 == '1' ~ '1_IN_CGE',
@@ -207,17 +174,90 @@ md.annot3 <- FetchData(cts, vars = c('hclust_0.3')) %>%
     dplyr::select(cell, annot_3) %>% 
     column_to_rownames(var = 'cell') 
 
-cts <- AddMetaData(cts, md.annot3)
+s.sub <- AddMetaData(s.sub, md.annot3)
 
-### dimplot 
-DimPlot(cts, reduction = 'har_umap_k10_m01', group.by = 'annot_3', label = T, pt.size = .1) + 
-  scale_color_manual(values = cols.clusters) + 
+qsave(s.sub, file = '../Integrate_Timepoints/Wong_AllTimepoints.qs')
+
+# ------- integration ------- # 
+
+# run harmony by sample
+s.sub <- NormalizeData(s.sub)
+s.sub <- FindVariableFeatures(s.sub)
+s.sub <- ScaleData(s.sub) 
+s.sub <- RunPCA(s.sub) 
+s.sub <- RunHarmony(s.sub, 'orig.ident', reduction.save = 'Harmony')
+
+s.sub <- FindNeighbors(s.sub, reduction = 'Harmony', dims = 1:30)
+s.sub <- FindClusters(s.sub, reduction = 'Harmony', resolution = 0.3, cluster.name = 'harm_0.3')
+s.sub <- RunUMAP(s.sub, reduction = 'Harmony', dims = 1:20, reduction.name = 'harm_umap')
+s.sub <- RunUMAP(s.sub, reduction = 'Harmony', dims = 1:30, n.neighbors = 10L, min.dist = 0.1, reduction.name = 'har_umap_k10_m01')
+s.sub <- RunUMAP(s.sub, reduction = 'Harmony', dims = 1:30, n.neighbors = 20L, min.dist = 0.0, reduction.name = 'har_umap_k20_m0')
+s.sub <- RunUMAP(s.sub, reduction = 'Harmony', dims = 1:30, n.neighbors = 20L, min.dist = 0.2, reduction.name = 'har_umap_k20_m02')
+
+# markers
+s.markers.df <- FindAllMarkers(s.sub, group_by = 'harm_0.3', only.pos = T)
+s.markers.top <- s.markers.df %>% group_by(cluster) %>% slice_head(n = 20)
+
+# h annotation
+df.hannot <- FetchData(s.sub, vars = c('harm_0.3', 'timepoint')) %>%
+  mutate(h_annot = case_when(harm_0.3 %in% c('0') ~ 'IN_CGE', 
+                             harm_0.3 %in% c('1') ~ 'IN_Mixed', 
+                             harm_0.3 %in% c('2') ~ 'Stress', 
+                             harm_0.3 %in% c('3') ~  'IN_CGE_Imm', 
+                             harm_0.3 %in% c('4') ~ 'IN_Prog', 
+                             harm_0.3 %in% c('5') ~ 'APC_OPC', 
+                             harm_0.3 %in% c('6', '9', '12', '14') ~ 'OPC_Olig', 
+                             harm_0.3 %in% c('7') ~ 'IN_Prog_MGE', 
+                             harm_0.3 %in% c('8') ~ 'IN_Mixed_Imm', 
+                             harm_0.3 %in% c('10') ~ 'IN_Prog_Cycling', 
+                             harm_0.3 %in% c('11') ~ 'CP', 
+                             harm_0.3 %in% c('13') ~ 'NE_cells'))
+
+s.sub <- AddMetaData(s.sub, df.hannot['h_annot'])
+
+h.markers <- FindAllMarkers(s.sub, group_by = 'h_annot', only.pos = T)
+
+h.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 4) %>%
+    ungroup() -> top4.markers
+
+
+p0 <- DoHeatmap(s.sub, group.by = 'h_annot', features = top4.markers$gene) + NoLegend() + scale_fill_viridis() + theme(aspect.ratio = 0.35)
+
+ggsave(p0, file = 'Step1_H_Annot_MarkerHeatmap.pdf', width = 12, height = 6, units = 'in', device = 'pdf')
+
+p0
+
+# score stream 
+spa.stream.markers <- read_tsv(file = '../Pipeline_Sept_2025/Step0c_Top200StreamMarkers_DupFilter_Res05.tsv') %>% pull(gene) 
+s.sub <- AddModuleScore(s.sub, features = list(spa.stream.markers), name = 'Stream_Top200_')
+
+## adjust plot order
+fp2 <- FeaturePlot(s.sub, reduction = 'har_umap_k20_m02', features = c('Stream_Top200_1')) 
+fp2.data <- fp2$data
+fp2.data <- fp2.data[order(fp2.data$Stream_Top200_1), ]
+
+p.d1 <- ggplot(fp2.data, aes(x = harumapk20m02_1, y = harumapk20m02_2, color = Stream_Top200_1)) + 
+  geom_point(size = 0.3) + 
+  scale_color_viridis(option = 'viridis') + 
+  theme_cowplot() + 
   theme(aspect.ratio = 1)
+
+ggsave(p.d1, file = 'Step1_ReMerge_Feature_StreamModuleScore.pdf', width = 7, height = 6, units = 'in', device = 'pdf')
+
+p.d1
+
+
+
+qsave(s.sub, file = 'Full_Harmonized_ReMerged.qs')
+
 
 # ------ Identify Stream ----- # 
 
 # subset D270 timepoint 
-cts.270 <- subset(cts, subset = timepoint == 'D270')
+cts.270 <- subset(s.sub, subset = timepoint == 'D270')
 
 # harmonize samples & re-embed 
 cts.270 <- NormalizeData(cts.270)
